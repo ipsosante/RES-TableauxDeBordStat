@@ -1,0 +1,148 @@
+---
+title: "Preuve de concept projet Scarabrute"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+#Options et packages
+
+knitr::opts_chunk$set(echo = FALSE)
+
+rm(list=ls())
+
+library(lubridate)
+library(jsonlite)
+library(tableone)
+library(ggplot2)
+library(xlsx)
+library(gmodels)
+
+```
+
+```{r data import, include=FALSE}
+##Importation des donnees externes
+
+d <- fromJSON("EMR.json")
+
+```
+
+```{r data prepare 1, include=FALSE}
+# Preparation des baes de travail
+
+# Conversion format dates stockees en texte
+d$health_professional_dt_start <- ymd_hms(d$consultations$health_professional_dt_start)
+d$consultations$health_professional_dt_end <- ymd_hms(d$consultations$health_professional_dt_end)
+d$consultations$dt_start <- ymd_hms(d$consultations$dt_start)
+d$consultations$dt_end <- ymd_hms(d$consultations$dt_end)
+d$patients$birth_date <- ymd(d$patients$birth_date)
+
+# Base intermediaire patients
+p <- d$patients
+colnames(p)[colnames(p)=="id"] <- "pat_id"
+p$pat_gender <- NA
+p$pat_gender[p$gender==0] <- "F"
+p$pat_gender[p$gender==1] <- "M"
+p$gender <- NULL
+colnames(p)[colnames(p)=="birth_date"] <- "pat_birth_date"
+
+# Base consultations (fusion des donnees patients)
+c <- merge(d$consultations, p, by.x = "patient_id", by.y = "pat_id",all.x = TRUE)
+colnames(c)[colnames(c)=="id"] <- "consultation_id"
+
+# Base consultations : age du patient le jour de la consultation et groupe age
+c$patient_age <- interval(c$pat_birth_date,c$dt_start) / dyears(1)
+c$patient_age [c$age_patient<0 | c$age_patient>120] <- NA
+c$groupe_age <- cut(c$patient_age, breaks=c(0,6,18,25,35,45,55,65,120), include.highest=TRUE)
+
+# Base consultations : nombre de consultations de chaque patient depuis son inscription a ipso
+## par ex si nb_consult=3 alors ceci est la troisieme consultation du patient a ipso depuis son inscription
+## et oui, il faut optimiser ce code qui est lent (voir avec les IT)
+c <- subset(c,!is.na(c$dt_start) & !is.na(c$patient_id))
+c <- c[order(c$patient_id, c$dt_start),]
+c$nb_consult <- NA
+c$nb_consult[1] <- 1
+n <- 1
+for (i in 2:nrow(c)) {
+  n <- ifelse(c$patient_id[i]>c$patient_id[i-1], 1, n+1) ;
+  c$nb_consult[i] <- n
+}
+
+# Base consultations : flag identifiant la plus recente consultation de chaque patient
+c <- c[order(c$patient_id, c$dt_start),]
+c$last_consult <- 0
+for (i in 1:(nrow(c)-1)) {
+  if (c$patient_id[i+1]>c$patient_id[i]) c$last_consult[i] <- 1
+}
+c$last_consult[nrow(c)] <- 1
+
+# Garbage collect
+
+rm(d,i,n)
+
+```
+
+```{r data select, include=FALSE}
+# Selection des donnees portant sur la periode / les motifs / les professionnels etudies 
+
+# Criteres de selection : periode
+# Exemple annee
+start_include <- dmy('01-01-2017')
+end_include <- dmy('31-12-2017')
+
+# Criteres de selection : motifs de consultation
+# Exemple tous motifs
+am_include <- c$appointment_motive_id
+
+# Criteres de selection : professionnels de sante
+# Exemple des trois fondatrices
+hp_include <- c(4)
+
+# Base de travail consultations limitee selon les criteres
+c <- subset(c, c$dt_start>=start_include & c$dt_start<=end_include)
+c <- subset(c, c$health_professional_id %in% hp_include & c$appointment_motive_id %in% am_include)
+```
+
+
+
+Activite
+===
+
+```{r actvivite, include=FALSE}
+
+#Nombre consultations et patients sur la periode
+nbcs <- nrow(c)
+nbp <- nrow(p)
+
+#Duree periode et nombre moyen consultations par semaine
+days_periode <- interval(start_include,end_include)/ddays(1)
+weeks_periode <- interval(start_include,end_include)/dweeks(1)
+csparsem <- nbcs/weeks_periode
+```
+
+L'analyse porte sur la periode comprise entre `r start_include` et `r end_include`, soit une duree de `r round(weeks_periode, 2)` semaines. 
+
+Le cabinet a realise durant cette periode `r nbcs` consultations, pour `r nbp` patients differents, soit en moyenne `r round(csparsem, 2)` consultations par semaine. 
+
+
+Caracteristiques des patients
+===
+
+Age
+---
+```{r age_patient_consult, warning=FALSE}
+plot <- ggplot(data=c, aes(c$patient_age)) + 
+  geom_histogram(breaks=seq(0, 100, by=1), 
+                 col="black", 
+                 fill="red", 
+                 alpha = .6)
+plot <- plot + theme_bw()
+plot <- plot + theme(panel.grid.minor = element_line(colour="grey"),legend.position="bottom")
+plot <- plot + scale_x_continuous(limits=c(0,100),minor_breaks = seq(0 , 100, 10), breaks = seq(0, 100, 10))
+#plot <- plot + scale_y_continuous(limits=c(0,7000),minor_breaks = seq(0 , 7000, 500), breaks = seq(0 , 7000, 1000))
+plot <- plot + xlab("Age du patient") + ylab ("Nombre de consultations")
+plot
+```
+
+
+
